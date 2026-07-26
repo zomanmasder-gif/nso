@@ -2,15 +2,15 @@
 
 # ============================================================
 # nso (Enchant Version of 9Router) — Railway Dockerfile
-# Multi-stage build with pnpm
+# Multi-stage build with pnpm (pinned to v10 for Node 20 compatibility)
 # ============================================================
 
 # ---- Stage 1: Dependencies (install production deps only) ----
 FROM node:20-alpine AS deps
 WORKDIR /app
 
-# Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Install pnpm v10 (compatible with Node 20)
+RUN npm install -g pnpm@10.34.5
 
 # Copy package files
 COPY package.json pnpm-lock.yaml ./
@@ -23,10 +23,10 @@ RUN pnpm install --prod --frozen-lockfile && \
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-# Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Install pnpm v10
+RUN npm install -g pnpm@10.34.5
 
-# Copy production node_modules from deps stage
+# Copy production node_modules from deps stage (optional: for cache)
 COPY --from=deps /app/node_modules ./node_modules
 
 # Copy source code

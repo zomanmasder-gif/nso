@@ -66,3 +66,8 @@ docker-compose.yml
 .github/
 .gitlab-ci.yml
 .travis.yml
+
+# Package managers (exclude from context but keep lockfile)
+!pnpm-lock.yaml
+!yarn.lock
+!package-lock.json

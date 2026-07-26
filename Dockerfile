@@ -1,53 +1,72 @@
-# syntax=docker/dockerfile:1.7
-ARG NODE_IMAGE=node:22-alpine
-FROM ${NODE_IMAGE} AS base
+# syntax=docker/dockerfile:1
+
+# ===================================
+# Stage 1: Dependencies
+# ===================================
+FROM node:24-alpine AS deps
 WORKDIR /app
 
-FROM base AS builder
+# Copy package files
+COPY package.json package-lock.json ./
+RUN npm ci --only=production && \
+    npm cache clean --force
 
-RUN apk --no-cache upgrade && apk --no-cache add python3 make g++ linux-headers
+# ===================================
+# Stage 2: Builder
+# ===================================
+FROM node:24-alpine AS builder
+WORKDIR /app
 
-COPY package.json ./
-RUN --mount=type=cache,target=/root/.npm \
-  npm install
+# Copy deps from stage 1
+COPY --from=deps /app/node_modules ./node_modules
 
-COPY . ./
+# Copy source code
+COPY . .
+
+# Build Next.js for production
+ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+
 RUN npm run build
 
-FROM ${NODE_IMAGE} AS runner
+# ===================================
+# Stage 3: Runner
+# ===================================
+FROM node:24-alpine AS runner
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="extremerouter"
-
 ENV NODE_ENV=production
-ENV PORT=20128
-ENV HOSTNAME=0.0.0.0
 ENV NEXT_TELEMETRY_DISABLED=1
-ENV DATA_DIR=/app/data
+ENV DATA_DIR=/data
+ENV HOSTNAME=0.0.0.0
 
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/custom-server.js ./custom-server.js
-COPY --from=builder /app/open-sse ./open-sse
-# Next file tracing can omit sibling files; MITM runs server.js as a separate process.
-COPY --from=builder /app/src/mitm ./src/mitm
-# Standalone node_modules may omit deps only required by the MITM child process.
-COPY --from=builder /app/node_modules/node-forge ./node_modules/node-forge
-# Ensure `next` is available at runtime in case tracing did not include it.
-COPY --from=builder /app/node_modules/next ./node_modules/next
+# Create non-root user
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 extremerouter && \
+    mkdir -p /data && \
+    chown -R extremerouter:nodejs /data
 
-RUN mkdir -p /app/data && chown -R node:node /app && \
-  mkdir -p /app/data-home && chown node:node /app/data-home && \
-  ln -sf /app/data-home /root/.extremerouter 2>/dev/null || true
+# Copy built artifacts
+COPY --from=builder --chown=extremerouter:nodejs /app/package.json ./package.json
+COPY --from=builder --chown=extremerouter:nodejs /app/package-lock.json ./package-lock.json
+COPY --from=builder --chown=extremerouter:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=extremerouter:nodejs /app/.next ./.next
+COPY --from=builder --chown=extremerouter:nodejs /app/public ./public
 
-# Fix permissions at runtime (handles mounted volumes)
-RUN apk --no-cache upgrade && apk --no-cache add su-exec && \
-  printf '#!/bin/sh\nchown -R node:node /app/data /app/data-home 2>/dev/null\nexec su-exec node "$@"\n' > /entrypoint.sh && \
-  chmod +x /entrypoint.sh
+# Copy config files if needed
+COPY --from=builder --chown=extremerouter:nodejs /app/next.config.js ./next.config.js 2>/dev/null || true
+COPY --from=builder --chown=extremerouter:nodejs /app/next.config.mjs ./next.config.mjs 2>/dev/null || true
 
-EXPOSE 20128
+# Copy server-side runtime files (if any)
+COPY --from=builder --chown=extremerouter:nodejs /app/src ./src 2>/dev/null || true
+COPY --from=builder --chown=extremerouter:nodejs /app/lib ./lib 2>/dev/null || true
 
-ENTRYPOINT ["/entrypoint.sh"]
-CMD ["node", "custom-server.js"]
+USER extremerouter
+
+EXPOSE 3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:' + (process.env.PORT || 3000) + '/api/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1); }).on('error', () => process.exit(1));"
+
+CMD ["npm", "run", "start"]
